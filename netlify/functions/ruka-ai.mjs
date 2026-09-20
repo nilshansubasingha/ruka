@@ -16,15 +16,25 @@ const limited = (ip) => { const n = Date.now(), e = hits.get(ip); if (!e || n > 
 const json = (body, status = 200) => Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
 const fail = (status, code) => json({ ok: false, code }, status);
 
-async function mistral(messages, max_tokens) {
-  const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 12000);
+// Mistral's free plan is reported to allow ~1 request/second, and this function makes two calls per hard question.
+// So calls are spaced out (MISTRAL_MIN_GAP_MS, default 1100) and a 429 is retried once after a short wait.
+let lastCallAt = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function mistral(messages, max_tokens, attempt = 0) {
+  const gap = Number(process.env.MISTRAL_MIN_GAP_MS ?? 1100), wait = lastCallAt + gap - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastCallAt = Date.now();
+  const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 6000);
   try {
     const res = await fetch((process.env.MISTRAL_API_BASE || 'https://api.mistral.ai/v1') + '/chat/completions', {
       method: 'POST', signal: ctrl.signal, headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.MISTRAL_API_KEY}` },
       body: JSON.stringify({ model: process.env.MISTRAL_MODEL || 'mistral-small-latest', messages, temperature: 0.1, max_tokens, response_format: { type: 'json_object' } }),
     });
-    if (res.status === 429) throw Object.assign(new Error('rate'), { code: 'rate_limited' });
-    if (!res.ok) throw Object.assign(new Error('upstream ' + res.status), { code: 'upstream' });
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 160);   // provider error text (never contains the student's question)
+      if (res.status === 429 && attempt === 0) { clearTimeout(timer); await sleep(1300); return mistral(messages, max_tokens, 1); }
+      throw Object.assign(new Error('upstream ' + res.status), { code: res.status === 429 ? 'rate_limited' : res.status === 401 || res.status === 403 ? 'auth' : 'upstream', status: res.status, detail });
+    }
     const j = await res.json();
     try { return JSON.parse(j.choices?.[0]?.message?.content ?? ''); } catch { throw Object.assign(new Error('bad json'), { code: 'bad_output' }); }
   } catch (e) { if (e.name === 'AbortError') throw Object.assign(new Error('timeout'), { code: 'timeout' }); throw e; }
@@ -65,7 +75,7 @@ export default async (req, context) => {
     console.log(JSON.stringify({ ev: 'ai', step: 'answer', cannot: a.cannot, ms: Date.now() - t0 }));   // no question text is ever logged
     return json({ ok: true, intent: 'other', topics: u.topics, facts: {}, answer: a });
   } catch (e) {
-    console.log(JSON.stringify({ ev: 'ai_error', code: e.code || 'error', ms: Date.now() - t0 }));
-    return fail(e.code === 'rate_limited' ? 429 : 503, e.code || 'error');
+    console.log(JSON.stringify({ ev: 'ai_error', code: e.code || 'error', status: e.status, detail: e.detail, ms: Date.now() - t0 }));
+    return fail(e.code === 'rate_limited' ? 429 : 503, e.code === 'auth' ? 'ai_disabled' : e.code || 'error');
   }
 };
