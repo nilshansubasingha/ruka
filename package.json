@@ -1,0 +1,13 @@
+{
+  "name": "ruka",
+  "version": "0.1.0-beta",
+  "private": true,
+  "type": "module",
+  "description": "RUKA: Resource & University Knowledge Assistant. Engine + tested prototype UI.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/engine.test.js tests/ai.test.js",
+    "test:e2e": "python3 tests/e2e.py && python3 tests/e2e_ai.py",
+    "dev": "MOCK=1 node scripts/dev.mjs"
+  }
+}
